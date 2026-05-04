@@ -8,7 +8,7 @@
 [![Rust](https://img.shields.io/badge/rust-1.95+-93450a)]()
 [![License](https://img.shields.io/badge/license-Proprietary-red)]()
 [![Detection Rules](https://img.shields.io/badge/detection_rules-110-blue)]()
-[![Tests](https://img.shields.io/badge/tests-171_passing-green)]()
+[![Tests](https://img.shields.io/badge/tests-267_passing-green)]()
 [![MITRE Coverage](https://img.shields.io/badge/MITRE_ATT%26CK-50%2B_techniques-purple)]()
 
 *Heuristic precision meets local LLM reasoning — zero cloud dependencies, full data sovereignty.*
@@ -43,7 +43,7 @@ NorthNarrow is a next-generation **EDR/XDR platform** written in Rust that combi
 ## ⚡ Key Differentiators
 
 - 🧠 **Cascading Oracle** — Heuristic primary (1 ms deterministic) + LocalOracle/Gemma 4 secondary for ambiguous events. Verdicts are intelligently merged, never ping-ponged.
-- 🔒 **100% Local Inference** — Gemma 4 E4B Q8 runs via embedded `llama.cpp` HTTP server. No outbound API calls. Verifiable with `tcpdump`.
+- 🔒 **100% Local Inference** — Gemma 4 E4B Q8 runs in-process via the agent's embedded `llama.cpp` Rust binding. Statically linked into the agent binary; no outbound API calls; no separate `llama-server` process; no `LD_LIBRARY_PATH`. Verifiable with `tcpdump`.
 - 🎯 **Adaptive Response Ladder** — 5-level severity (`LOG → ALERT → THROTTLE → KILL → ISOLATE`), proportional to confidence × score.
 - 🔗 **Per-host Correlation Engine** — Sliding windows with bounded memory, lock-free concurrent absorption, idle-host eviction.
 - 🛡️ **Graceful Degradation** — If the AI server is unreachable, NorthNarrow falls back to heuristic-only mode without service interruption.
@@ -354,6 +354,72 @@ directory creation, ownership, and access rights from the unit
 declaration. Unblocks license-tier persistence and signed-rule
 infrastructure for future milestones.
 
+### ✅ Foundational layer — production-ready
+
+A 4-milestone batch elevating the agent from research-quality to
+production-ready on the operational substrate.
+
+- **Configuration:** TOML loader with typed `Config` struct, validation,
+  and `northnarrow-cli config validate` + `dump-defaults` round-trip.
+- **Persistent storage:** alerts and response-action history in an
+  embedded redb 2.x database with a retention loop. Pure-Rust,
+  single-file, MVCC; survives agent restarts.
+- **Metrics:** Prometheus exposition on `127.0.0.1:9090`. Five
+  ops-critical handles instrumented (event ingest rate, oracle
+  decisions, response actions, storage pressure, watchdog restarts);
+  more on the way.
+- **Admin CLI (`northnarrow-cli`):** 8 subcommands (config, alerts,
+  events, storage, status, version, ai), stable exit-code contract,
+  JSON + table output modes, audit-trail-friendly.
+
+All four milestones host-side runtime-validated.
+
+### ✅ On-device LLM inference operational
+
+The AI tier ships as a Rust-FFI wrapper around `llama.cpp` via the
+`llama-cpp-4` crate, statically linked into the agent binary. No
+`LD_LIBRARY_PATH`, no system-wide `libllama` install, no separate
+`llama-server` process.
+
+- **Configuration:** new `[ai.local_oracle]` section with `enabled`,
+  `model_path`, `device`, `max_memory_mb`, `context_tokens`,
+  `inference_timeout_ms`. `enabled = false` by default during alpha;
+  operators opt in explicitly.
+- **CPU-only at this stage** (`n_gpu_layers = 0`); GPU support is a
+  future sub-milestone alongside `device = "gpu"` / `"auto"` config
+  validation.
+- **Memory budget enforcement:** post-load resident-set-size check
+  against `max_memory_mb` × 1.5 (the 1.5× factor covers KV cache and
+  sampler workspace). Misconfiguration surfaces a precise error
+  message with the actual measured RSS, the configured budget, and a
+  remediation hint (raise budget or use smaller quantization).
+- **Greedy sampling** (temperature 0) for deterministic inference,
+  matching the on-device verifiability story.
+- **Per-call inference context** (no pool yet); a context pool to
+  amortize KV cache build cost across the cascading-oracle path is
+  planned.
+- **Smoke ergonomics:** `northnarrow-cli ai test-prompt --model PATH
+  <text>` for first-run validation. Operators can verify a fresh GGUF
+  loads and infers without editing config TOML.
+
+Runtime smoke validation: 6-scenario suite on the dev workstation
+covering clean load + inference, missing-file error handling, invalid
+config (rejected with forward reference to GPU sub-milestone), memory
+budget enforcement, disabled-config behavior, and edge cases. End-to-end
+inference confirmed against `Gemma 4 E4B-it Q8_K_XL.gguf`.
+
+Two PARTIAL verdicts from the smoke suite trace to one acknowledged
+NON-scope item — chat templating (`<start_of_turn>` / role tags) is
+queued for the next sub-milestone in the AI-track batch. Without
+templating, raw prompts trigger either immediate end-of-generation
+(question-form prompts) or unbounded continuation (completion-form
+prompts).
+
+A pre-existing HTTP-based LocalOracle (talking to a separate
+`llama-server` on `localhost:8080`) coexists transitionally and remains
+the production oracle backend until the cascading-oracle path is
+migrated to the in-process FFI engine.
+
 ### 📐 Milestone 15 — External Threat Intelligence Ingestion (designed)
 
 Design committed; implementation queued post-VM-day. The complete design
@@ -405,18 +471,19 @@ to network-side intel.
 
 ## 📋 Current Status
 
-🟠 **Alpha — pre-release, pre-customer. M14 closed and runtime-validated, M15 in design, M-AI track queued.**
+🟠 **Alpha — pre-customer. AI inference path operational on dev hardware. Kernel telemetry stack runtime-validated end-to-end. Foundational layer (configuration, persistent storage, metrics, admin CLI) production-ready.**
 
 | Metric | Value |
 |--------|-------|
 | Detection rules | **110** |
 | MITRE techniques covered | **50+** |
-| Test coverage | **171 tests passing** (unit + integration) |
+| Test coverage | **267 tests passing** (unit + integration) |
 | Supported OS | Linux (Ubuntu 24.04 LTS target, 22.04 supported, WSL2 dev). Windows planned future release |
 | Detection latency (heuristic) | < 1 ms |
 | Detection latency (LocalOracle, CPU) | 7–15 s on Ryzen 9 3900XT |
 | Memory footprint (agent) | ~30 MB without LLM |
-| Memory footprint (LLM) | ~11 GB (Gemma 4 E4B Q8) |
+| Memory footprint (LLM) | ~9 GB (Gemma 4 E4B Q8 mmap'd, dev workstation observation) |
+| Deployment | Single static-link binary; no `LD_LIBRARY_PATH`, no system `libllama` install, no separate `llama-server` process |
 
 ---
 
